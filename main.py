@@ -37,8 +37,8 @@ class SerialHandler(QThread):
         # Inicjalizacja interfejsu – wysyłamy komendy startowe
         # self.send_direct("ATZ")      # Reset interfejsu
         # self.msleep(1000)            # krótka przerwa
-        # self.send_direct("ATSP0")    # Ustawienie automatycznego wyboru protokołu
-        # self.msleep(1000)
+        self.send_direct("ATSP0")    # Ustawienie automatycznego wyboru protokołu
+        self.msleep(1000)
         self.send_direct("ATE0")
         self.msleep(1000)
         self.send_direct("ATL0")
@@ -111,6 +111,8 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         self.timeout_timer = QTimer(self)
         self.timeout_timer.timeout.connect(self.handle_timeout)
         self.manual_commands_queue = []
+        self.commands_queue = []  # Inicjalizacja pustej kolejki komend
+        # self.lineEdit_RPM.setText("wynik")
 
         # Połączenie przycisków z funkcjami (slotami)
         self.start_button.clicked.connect(self.start_serial)
@@ -145,36 +147,103 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         self.stop_button.setEnabled(True)
         self.update_text("Port uruchomiony. Możesz włączyć automatyczne odpytywanie checkboxem.")
 
-
     def toggle_polling(self, state):
-        # Sprawdzamy, czy mamy aktywne połączenie (serialHandler)
-        if self.serialHandler:
-            if state == Qt.Checked:
-                self.poll_timer.start(200)  # uruchamiamy timer: co 20 ms wysyłamy zapytanie
-                self.update_text("Automatyczne odpytywanie włączone.")
-            else:
-                self.poll_timer.stop()
-                self.update_text("Automatyczne odpytywanie wyłączone.")
+        """
+        Funkcja sterująca automatycznym odpytywaniem.
+        Kolejne komendy są wysyłane dopiero po odebraniu odpowiedzi.
+        Jeśli odpowiedź nie nadejdzie w określonym czasie, ponawiamy komendę.
+        """
+        try:
+            if self.serialHandler:
+                if state == Qt.Checked:
+                    self.update_text("Automatyczne odpytywanie włączone.")
+                    self.commands_queue = list(self.cfg['commands'].values())  # Ładowanie komend do kolejki
+                    self.timeout_timer = QTimer(self)
+                    self.timeout_timer.timeout.connect(self.handle_timeout)
+                    self.current_command = None  # Przechowujemy aktualną wysyłaną komendę
+                    self.commands_quanity = None
+                    self.actual_command = 0
+                    self.send_next_command()  # Rozpoczęcie wysyłania pierwszej komendy
+                else:
+                    self.commands_queue = []  # Czyszczenie kolejki
+                    self.update_text("Automatyczne odpytywanie wyłączone.")
+        except Exception as e: print(e)
 
+    def send_next_command(self):
+        """
+        Wysyła kolejną komendę z kolejki, jeśli istnieje.
+        Uruchamia także timer, który sprawdzi, czy przyszła odpowiedź.
+        """
+        try:
+            if self.commands_queue:
+                self.commands_quanity = len(self.commands_queue)
+                if self.actual_command == len(self.commands_queue)-1:
+                    self.actual_command = 0
+                else:
+                    self.actual_command += 1
+
+                # command = self.commands_queue.pop(0)
+                command = self.commands_queue[self.actual_command]
+
+                logging.info(f"Wysyłam komendę: {command}")
+                self.current_command = command  # Zapamiętujemy aktualną komendę
+
+                # Uruchamiamy wysyłanie komendy w nowym wątku
+                threading.Thread(target=self.send, args=(command,), daemon=True).start()
+
+                # Uruchamiamy timeout na 2 sekundy (jeśli odpowiedź nie nadejdzie, komenda zostanie ponowiona)
+                self.timeout_timer.start(2000)
+            else:
+                logging.info("Wszystkie komendy zostały wysłane.")
+        except Exception as e:
+            print(e)
 
     def decoding(self, text):
         """
-        Odbiera dane, aktualizuje GUI i zatrzymuje timeout.
-        Po odebraniu odpowiedzi wysyłamy kolejną komendę.
+        Slot odbierający dane z portu COM.
+        Po otrzymaniu odpowiedzi zatrzymuje timeout i wysyła następną komendę.
         """
-        try:
-            self.update_text(text)
-            received = text.replace(" ", "").replace("\r", "")
-            received = re.findall('..', received)
-            print(received)
-            # Jeśli przyszła odpowiedź, zatrzymujemy timer i wysyłamy następną komendę
-            if self.timeout_timer.isActive():
-                self.timeout_timer.stop()
+        self.update_text(text)
+        received = text.replace(" ", "").replace("\r", "")
+        received = re.findall('..', received)
+        threading.Thread(target=self.wypisz_predkosc, args=(received,), daemon=True).start()
+        # print(received[0])
 
-            # Po odebraniu odpowiedzi wysyłamy następną komendę z kolejki
-            QtCore.QTimer.singleShot(500, self.send_next_manual_command)
-        except Exception as e:
-            print(e)
+        # if received[0] not in ["Ot", "Wy", "AT"]:
+            # print("Dekodowanie:", received)
+
+        # Jeśli przyszła odpowiedź, zatrzymujemy timer i wysyłamy następną komendę
+        if self.timeout_timer.isActive():
+            self.timeout_timer.stop()
+
+        # Po odebraniu odpowiedzi wysyłamy następną komendę z kolejki
+        QtCore.QTimer.singleShot(20, self.send_next_command)
+
+
+    def wypisz_predkosc(self, bit):
+        if bit[0] == "NO":
+            return
+        obliczenia = {
+            "410C": lambda a, b: ((a*256)+b)/4,
+            "410D": lambda a : a*256
+        }
+
+        key = bit[0] + bit[1]
+        wynik = None
+        if key == "410C":
+            wynik = obliczenia[key](int(bit[2], 16), int(bit[3], 16))
+            self.lineEdit_RPM.setText(str(wynik))
+        elif key == "410D":
+            wynik = obliczenia[key](int(bit[2], 16))
+            self.lineEdit_V.setText(str(wynik))
+        print(wynik)
+        if wynik == None:
+            print(bit)
+        # print(obliczenia[bit[0]+bit[1]](int(bit[2], 16), int(bit[3], 16)))
+        # dec = bit[0] + bit[1]
+
+
+        return
 
 
     def stop_serial(self):
@@ -203,12 +272,16 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         Jeśli nie otrzymamy odpowiedzi w określonym czasie, komenda zostanie wysłana ponownie.
         """
         try:
-            self.manual_commands_queue = list(self.cfg['commands'].items())
+            # self.manual_commands_queue = list(self.cfg['commands'].items())
+            # print(self.cfg['commands'].items())
+            self.manual_commands_queue = list({"command": self.lineEdit_command.text()}.items())
+            # print(list({"command": self.lineEdit_command.text()}.items()))
             self.current_command = None  # Przechowuje aktualną wysyłaną komendę
             self.timeout_timer = QTimer(self)
             self.timeout_timer.timeout.connect(self.handle_timeout)
             self.send_next_manual_command()
         except Exception as e: print(e)
+
 
     def send_next_manual_command(self):
         """
@@ -231,27 +304,24 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         except Exception as e:
             print(e)
 
-
     def handle_timeout(self):
         """
         Funkcja wywoływana przez QTimer, jeśli nie przyszła odpowiedź na daną komendę.
         Powtarza wysłanie aktualnej komendy.
-            """
-
-        try:
-            if self.current_command:
-                logging.warning(f"Brak odpowiedzi, ponowne wysłanie: {self.current_command}")
-                threading.Thread(target=self.send, args=(self.current_command,), daemon=True).start()
-        except Exception as e:
-            print(e)
+        """
+        if self.current_command:
+            logging.warning(f"Brak odpowiedzi, ponowne wysłanie: {self.current_command}")
+            threading.Thread(target=self.send, args=(self.current_command,), daemon=True).start()
+            # Ponownie uruchamiamy timeout, żeby nie zapętlić nieskończenie
+            self.timeout_timer.start(2000)
 
     def send(self, text):
         """
         Metoda wysyłająca pojedynczą komendę do serialHandler.
         """
+
         if self.serialHandler:
             self.serialHandler.writeCommand(text)
-
 
 
     def update_text(self, text):
