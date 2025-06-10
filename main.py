@@ -43,6 +43,8 @@ class SerialHandler(QThread):
         self.msleep(1000)
         self.send_direct("ATL0")
         self.msleep(1000)
+        # self.send_direct("ATR0")
+        # self.msleep(1000)
 
         # Główna pętla odczytu – sprawdzamy bufor danych
         while self.running:
@@ -106,6 +108,9 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         self.setAcceptDrops(True)
         self.text_edit.setReadOnly(True)
         self.stop_button.setEnabled(False)
+        self.timeout_timer = QTimer(self)
+        self.timeout_timer.timeout.connect(self.handle_timeout)
+        self.manual_commands_queue = []
 
         # Połączenie przycisków z funkcjami (slotami)
         self.start_button.clicked.connect(self.start_serial)
@@ -140,6 +145,7 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         self.stop_button.setEnabled(True)
         self.update_text("Port uruchomiony. Możesz włączyć automatyczne odpytywanie checkboxem.")
 
+
     def toggle_polling(self, state):
         # Sprawdzamy, czy mamy aktywne połączenie (serialHandler)
         if self.serialHandler:
@@ -153,17 +159,22 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
 
     def decoding(self, text):
         """
-        Slot wywoływany przy odbiorze danych z portu COM.
-        Aktualizuje GUI i wyzwala wysłanie kolejnej komendy (jeśli jest oczekiwana).
+        Odbiera dane, aktualizuje GUI i zatrzymuje timeout.
+        Po odebraniu odpowiedzi wysyłamy kolejną komendę.
         """
-        self.update_text(text)
-        received = text.replace(" ", "").replace("\r", "")
-        received = re.findall('..', received)
-        print(received)
-        # Jeśli trwa asynchroniczna sekwencja wysyłania komend, wyślij następną po krótkim opóźnieniu.
-        if hasattr(self, "manual_commands_queue") and self.manual_commands_queue:
-            # Ustawiamy lekki delay, żeby pewność była, że odpowiedź została przetworzona.
-            QtCore.QTimer.singleShot(100, self.send_next_manual_command)
+        try:
+            self.update_text(text)
+            received = text.replace(" ", "").replace("\r", "")
+            received = re.findall('..', received)
+            print(received)
+            # Jeśli przyszła odpowiedź, zatrzymujemy timer i wysyłamy następną komendę
+            if self.timeout_timer.isActive():
+                self.timeout_timer.stop()
+
+            # Po odebraniu odpowiedzi wysyłamy następną komendę z kolejki
+            QtCore.QTimer.singleShot(500, self.send_next_manual_command)
+        except Exception as e:
+            print(e)
 
 
     def stop_serial(self):
@@ -188,28 +199,51 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
 
     def send_poll_manually(self):
         """
-        Funkcja wywoływana przez przycisk poll_button.
-        Inicjuje sekwencyjne wysyłanie komend z sekcji [commands] w konfiguracji.
+        Inicjalizacja wysyłania komend w kolejności.
+        Jeśli nie otrzymamy odpowiedzi w określonym czasie, komenda zostanie wysłana ponownie.
         """
-        # Utwórz kolejkę komend – zachowujemy zarówno nazwę, jak i komendę,
-        # co pozwoli na informacyjne logowanie.
-
-        self.manual_commands_queue = list(self.cfg['commands'].items())
-        logging.info("Rozpoczynam wysyłanie komend asynchronicznie.")
-        self.send_next_manual_command()
+        try:
+            self.manual_commands_queue = list(self.cfg['commands'].items())
+            self.current_command = None  # Przechowuje aktualną wysyłaną komendę
+            self.timeout_timer = QTimer(self)
+            self.timeout_timer.timeout.connect(self.handle_timeout)
+            self.send_next_manual_command()
+        except Exception as e: print(e)
 
     def send_next_manual_command(self):
         """
-        Wysyła następną komendę z kolejki, jeśli taka istnieje.
-        Uruchomienie komendy odbywa się w osobnym wątku, by nie blokować GUI.
+        Wysyła następną komendę z kolejki, jeśli istnieje.
+        Uruchamia także timer, który sprawdzi, czy przyszła odpowiedź.
         """
-        if self.manual_commands_queue:
-            name, command = self.manual_commands_queue.pop(0)
-            logging.info(f"Wysyłam komendę '{name}': {command}")
-            # Uruchamiamy wysłanie komendy w osobnym wątku (bez .join()!)
-            threading.Thread(target=self.send, args=(command,), daemon=True).start()
-        else:
-            logging.info("Wszystkie komendy zostały wysłane.")
+        try:
+            if self.manual_commands_queue:
+                name, command = self.manual_commands_queue.pop(0)
+                logging.info(f"Wysyłam komendę '{name}': {command}")
+                self.current_command = command  # Zapamiętujemy aktualną komendę
+
+                # Uruchamiamy wysyłanie komendy w nowym wątku
+                threading.Thread(target=self.send, args=(command,), daemon=True).start()
+
+                # Rozpoczynamy timeout na 2 sekundy
+                self.timeout_timer.start(2000)
+            else:
+                logging.info("Wszystkie komendy zostały wysłane.")
+        except Exception as e:
+            print(e)
+
+
+    def handle_timeout(self):
+        """
+        Funkcja wywoływana przez QTimer, jeśli nie przyszła odpowiedź na daną komendę.
+        Powtarza wysłanie aktualnej komendy.
+            """
+
+        try:
+            if self.current_command:
+                logging.warning(f"Brak odpowiedzi, ponowne wysłanie: {self.current_command}")
+                threading.Thread(target=self.send, args=(self.current_command,), daemon=True).start()
+        except Exception as e:
+            print(e)
 
     def send(self, text):
         """
