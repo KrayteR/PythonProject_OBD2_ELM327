@@ -1,6 +1,7 @@
 import logging
 import re
 import sys
+import threading
 import time
 from configparser import ConfigParser
 
@@ -12,10 +13,10 @@ from PyQt5 import uic, QtCore, QtWidgets
 from PyQt5.QtCore import Qt, Q_ARG
 
 SEND = ""
+RECEIVED_BACK = True
 
 class SerialHandler(QThread):
     data_received = pyqtSignal(str)  # Sygnał wysyłany przy każdym odebraniu danych
-
     def __init__(self, port, baud=38400, timeout=1):
         super().__init__()
         self.port = port
@@ -34,10 +35,10 @@ class SerialHandler(QThread):
             return
 
         # Inicjalizacja interfejsu – wysyłamy komendy startowe
-        self.send_direct("ATZ")      # Reset interfejsu
-        self.msleep(1000)            # krótka przerwa
-        self.send_direct("ATSP0")    # Ustawienie automatycznego wyboru protokołu
-        self.msleep(1000)
+        # self.send_direct("ATZ")      # Reset interfejsu
+        # self.msleep(1000)            # krótka przerwa
+        # self.send_direct("ATSP0")    # Ustawienie automatycznego wyboru protokołu
+        # self.msleep(1000)
         self.send_direct("ATE0")
         self.msleep(1000)
         self.send_direct("ATL0")
@@ -57,6 +58,7 @@ class SerialHandler(QThread):
         self.ser.close()
         self.data_received.emit("Port został zamknięty.")
 
+
     @pyqtSlot(str)
     def writeCommand(self, command):
         """
@@ -72,6 +74,7 @@ class SerialHandler(QThread):
                 print("Wyslano:", command.strip())
             except Exception as e:
                 self.data_received.emit("Błąd przy wysyłce: " + str(e))
+
 
     def send_direct(self, command):
         """
@@ -107,7 +110,7 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         # Połączenie przycisków z funkcjami (slotami)
         self.start_button.clicked.connect(self.start_serial)
         self.stop_button.clicked.connect(self.stop_serial)
-        self.poll_button.clicked.connect(self.send_poll)
+        self.poll_button.clicked.connect(self.send_poll_manually)
 
         # Podłączamy sygnał zmiany stanu checkboxa do slotu toggle_polling
         self.checkbox_loop.stateChanged.connect(self.toggle_polling)
@@ -149,17 +152,18 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
 
 
     def decoding(self, text):
+        """
+        Slot wywoływany przy odbiorze danych z portu COM.
+        Aktualizuje GUI i wyzwala wysłanie kolejnej komendy (jeśli jest oczekiwana).
+        """
+        self.update_text(text)
         received = text.replace(" ", "").replace("\r", "")
         received = re.findall('..', received)
-        # print(received[0])
-
-        if received[0] not in ["Ot", "Wy", "AT"]:
-            print("Dekodowanie:", received)
-
-        # received = text.encode('utf-8')
-        # print(received)
-        self.update_text(text)
-        return
+        print(received)
+        # Jeśli trwa asynchroniczna sekwencja wysyłania komend, wyślij następną po krótkim opóźnieniu.
+        if hasattr(self, "manual_commands_queue") and self.manual_commands_queue:
+            # Ustawiamy lekki delay, żeby pewność była, że odpowiedź została przetworzona.
+            QtCore.QTimer.singleShot(100, self.send_next_manual_command)
 
 
     def stop_serial(self):
@@ -172,14 +176,49 @@ class MainWindow(QtWidgets.QMainWindow, UI_main_path):
         self.stop_button.setEnabled(False)
         self.update_text("Połączenie zakończone.")
 
+
     def send_poll(self):
         """
         Funkcja wywoływana przez QTimer lub przycisk poll_button.
         Wysyła zapytanie "010C" do interfejsu.
         """
+
         if self.serialHandler:
             self.serialHandler.writeCommand(self.lineEdit_command.text())
-            SEND = self.lineEdit_command.text()
+
+    def send_poll_manually(self):
+        """
+        Funkcja wywoływana przez przycisk poll_button.
+        Inicjuje sekwencyjne wysyłanie komend z sekcji [commands] w konfiguracji.
+        """
+        # Utwórz kolejkę komend – zachowujemy zarówno nazwę, jak i komendę,
+        # co pozwoli na informacyjne logowanie.
+
+        self.manual_commands_queue = list(self.cfg['commands'].items())
+        logging.info("Rozpoczynam wysyłanie komend asynchronicznie.")
+        self.send_next_manual_command()
+
+    def send_next_manual_command(self):
+        """
+        Wysyła następną komendę z kolejki, jeśli taka istnieje.
+        Uruchomienie komendy odbywa się w osobnym wątku, by nie blokować GUI.
+        """
+        if self.manual_commands_queue:
+            name, command = self.manual_commands_queue.pop(0)
+            logging.info(f"Wysyłam komendę '{name}': {command}")
+            # Uruchamiamy wysłanie komendy w osobnym wątku (bez .join()!)
+            threading.Thread(target=self.send, args=(command,), daemon=True).start()
+        else:
+            logging.info("Wszystkie komendy zostały wysłane.")
+
+    def send(self, text):
+        """
+        Metoda wysyłająca pojedynczą komendę do serialHandler.
+        """
+        if self.serialHandler:
+            self.serialHandler.writeCommand(text)
+
+
 
     def update_text(self, text):
         self.text_edit.append(text)

@@ -95,6 +95,32 @@
     <string>loop</string>
    </property>
   </widget>
+  <widget class="QLineEdit" name="lineEdit_RPM">
+   <property name="geometry">
+    <rect>
+     <x>210</x>
+     <y>70</y>
+     <width>113</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>010C</string>
+   </property>
+  </widget>
+  <widget class="QLineEdit" name="lineEdit_V">
+   <property name="geometry">
+    <rect>
+     <x>210</x>
+     <y>100</y>
+     <width>113</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>010C</string>
+   </property>
+  </widget>
  </widget>
  <resources/>
  <connections/>
